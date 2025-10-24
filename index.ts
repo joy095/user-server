@@ -13,6 +13,54 @@ import NodeCache from 'node-cache';
 
 const app = express();
 // Optimized cache settings for better performance
+
+// Trust proxy for Render/Vercel (Fixes express-rate-limit issue)
+app.set('trust proxy', 1);
+
+// Enable security and performance middlewares
+app.use(
+    helmet({
+        contentSecurityPolicy: {
+            directives: {
+                defaultSrc: ["'self'"],
+                styleSrc: ["'self'", "'unsafe-inline'"],
+                scriptSrc: ["'self'"],
+                imgSrc: ["'self'", 'data:', 'https:'],
+            },
+        },
+    })
+);
+app.use(compression());
+app.use(
+    cors({
+        origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+        credentials: true,
+        methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'Accept'],
+    })
+);
+app.use(
+    express.json({
+        limit: '10kb',
+        verify: (req, res, buf) => {
+            (req as any).rawBody = buf;
+        },
+    })
+);
+app.use(express.urlencoded({ extended: true }));
+
+// 3. Safe sanitize (Fixes “Skipping sanitize on non-plain object”)
+app.use((req, res, next) => {
+    try {
+        if (req.is('multipart/form-data')) return next(); // Skip on file uploads
+        mongoSanitize({ replaceWith: '_' })(req, res, next);
+    } catch (err) {
+        console.warn('Skipping sanitize on non-plain object:', err instanceof Error ? err.message : 'Unknown error');
+        next();
+    }
+});
+
+
 const cache = new NodeCache({
     stdTTL: 600, // 10 minutes default TTL
     checkperiod: 120, // Check for expired keys every 2 minutes
@@ -127,22 +175,21 @@ const User = mongoose.model('User', userSchema);
 // Nodemailer Configuration
 const transporter = nodemailer.createTransport({
     host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-    port: Number(process.env.EMAIL_PORT) || 587,
-    secure: false, // Use false for port 587, true for port 465
+    port: Number(process.env.EMAIL_PORT) || 465,
+    secure: true, // true for port 465
     auth: {
         user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
+        pass: process.env.EMAIL_PASS,
     },
-    connectionTimeout: 60000, // 60 seconds
-    greetingTimeout: 30000, // 30 seconds
-    socketTimeout: 60000, // 60 seconds
-    pool: true, // Use connection pooling
-    maxConnections: 5, // Maximum number of connections in pool
-    maxMessages: 100, // Maximum number of messages per connection
-    rateLimit: 14, // Maximum number of messages per second
+    connectionTimeout: 10000,
+    greetingTimeout: 5000,
+    socketTimeout: 10000,
+    pool: true,
+    maxConnections: 3,
+    maxMessages: 50,
     tls: {
-        rejectUnauthorized: false // Allow self-signed certificates
-    }
+        rejectUnauthorized: false,
+    },
 });
 
 // Utility Functions
