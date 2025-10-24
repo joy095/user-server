@@ -128,10 +128,20 @@ const User = mongoose.model('User', userSchema);
 const transporter = nodemailer.createTransport({
     host: process.env.EMAIL_HOST || 'smtp.ethereal.email',
     port: Number(process.env.EMAIL_PORT) || 587,
-    secure: true,
+    secure: true, // Use false for port 587, true for port 465
     auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS
+    },
+    connectionTimeout: 60000, // 60 seconds
+    greetingTimeout: 30000, // 30 seconds
+    socketTimeout: 60000, // 60 seconds
+    pool: true, // Use connection pooling
+    maxConnections: 5, // Maximum number of connections in pool
+    maxMessages: 100, // Maximum number of messages per connection
+    rateLimit: 14, // Maximum number of messages per second
+    tls: {
+        rejectUnauthorized: false // Allow self-signed certificates
     }
 });
 
@@ -141,12 +151,28 @@ const generateOTP = (): string => {
 };
 
 const sendOTPEmail = async (email: string, otp: string): Promise<void> => {
-    await transporter.sendMail({
-        from: process.env.EMAIL_FROM || 'noreply@usermgmt.com',
-        to: email,
-        subject: 'Your OTP for Verification',
-        html: `<p>Your OTP is: <strong>${otp}</strong></p><p>Valid for 10 minutes.</p>`
-    });
+    try {
+        // Verify transporter configuration first
+        await transporter.verify();
+
+        const mailOptions = {
+            from: process.env.EMAIL_FROM || 'noreply@usermgmt.com',
+            to: email,
+            subject: 'Your OTP for Verification',
+            html: `<p>Your OTP is: <strong>${otp}</strong></p><p>Valid for 10 minutes.</p>`
+        };
+
+        const info = await transporter.sendMail(mailOptions);
+        console.log('Email sent successfully:', info.messageId);
+    } catch (error: any) {
+        console.error('Email sending failed:', {
+            error: error.message,
+            code: error.code,
+            command: error.command,
+            response: error.response
+        });
+        throw new Error(`Failed to send email: ${error.message}`);
+    }
 };
 
 // Validation Middleware
@@ -220,8 +246,13 @@ app.post('/api/auth/generate-otp', validateOTP.slice(0, 1), asyncHandler(async (
 
     try {
         await sendOTPEmail(email, otp);
-    } catch (error) {
+    } catch (error: any) {
         console.error('Email send error:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to send OTP email. Please try again later.',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
     }
 
     res.json({
@@ -304,8 +335,13 @@ app.post('/api/users', validateUser, asyncHandler(async (req: Request, res: Resp
 
     try {
         await sendOTPEmail(email, otp);
-    } catch (error) {
+    } catch (error: any) {
         console.error('Email send error:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'User created but failed to send OTP email. Please try generating OTP again.',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
     }
 
     // Clear all user list cache entries
