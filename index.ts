@@ -17,6 +17,14 @@ const app = express();
 // Trust proxy for Render/Vercel (Fixes express-rate-limit issue)
 app.set('trust proxy', 1);
 
+const cache = new NodeCache({
+    stdTTL: 600, // 10 minutes default TTL
+    checkperiod: 120, // Check for expired keys every 2 minutes
+    useClones: false, // Don't clone objects for better performance
+    deleteOnExpire: true, // Automatically delete expired keys
+    maxKeys: 1000 // Limit cache size to prevent memory issues
+});
+
 // Enable security and performance middlewares
 app.use(
     helmet({
@@ -59,44 +67,6 @@ app.use((req, res, next) => {
         next();
     }
 });
-
-
-const cache = new NodeCache({
-    stdTTL: 600, // 10 minutes default TTL
-    checkperiod: 120, // Check for expired keys every 2 minutes
-    useClones: false, // Don't clone objects for better performance
-    deleteOnExpire: true, // Automatically delete expired keys
-    maxKeys: 1000 // Limit cache size to prevent memory issues
-});
-
-// Security and Performance Middleware
-app.use(helmet({
-    contentSecurityPolicy: {
-        directives: {
-            defaultSrc: ["'self'"],
-            styleSrc: ["'self'", "'unsafe-inline'"],
-            scriptSrc: ["'self'"],
-            imgSrc: ["'self'", "data:", "https:"],
-        },
-    },
-}));
-app.use(compression()); // Enable gzip compression
-app.use(cors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'Accept']
-}));
-app.use(express.json({
-    limit: '10kb',
-    verify: (req, res, buf) => {
-        // Store raw body for potential signature verification
-        (req as any).rawBody = buf;
-    }
-}));
-// app.use(mongoSanitize({
-//     replaceWith: '_',
-// }));
 
 
 app.use((req, res, next) => {
