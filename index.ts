@@ -7,23 +7,13 @@ import rateLimit from 'express-rate-limit';
 import mongoSanitize from 'express-mongo-sanitize';
 import compression from 'compression';
 import { body, validationResult } from 'express-validator';
-import nodemailer from 'nodemailer';
 import crypto from 'crypto';
 import NodeCache from 'node-cache';
 
 const app = express();
-// Optimized cache settings for better performance
 
-// Trust proxy for Render/Vercel (Fixes express-rate-limit issue)
+// Trust proxy for Render/Vercel
 app.set('trust proxy', 1);
-
-const cache = new NodeCache({
-    stdTTL: 600, // 10 minutes default TTL
-    checkperiod: 120, // Check for expired keys every 2 minutes
-    useClones: false, // Don't clone objects for better performance
-    deleteOnExpire: true, // Automatically delete expired keys
-    maxKeys: 1000 // Limit cache size to prevent memory issues
-});
 
 // Enable security and performance middlewares
 app.use(
@@ -57,25 +47,22 @@ app.use(
 );
 app.use(express.urlencoded({ extended: true }));
 
-// 3. Safe sanitize (Fixes “Skipping sanitize on non-plain object”)
+// Safe sanitize
 app.use((req, res, next) => {
     try {
-        if (req.is('multipart/form-data')) return next(); // Skip on file uploads
+        if (req.is('multipart/form-data')) return next();
         mongoSanitize({ replaceWith: '_' })(req, res, next);
     } catch (err) {
-        console.warn('Skipping sanitize on non-plain object:', err instanceof Error ? err.message : 'Unknown error');
-        next();
+        next(); // Silently skip sanitization errors
     }
 });
 
-
-app.use((req, res, next) => {
-    try {
-        mongoSanitize()(req, res, next);
-    } catch (err) {
-        console.warn('Skipping sanitize on non-plain object:', err instanceof Error ? err.message : 'Unknown error');
-        next();
-    }
+const cache = new NodeCache({
+    stdTTL: 600,
+    checkperiod: 120,
+    useClones: false,
+    deleteOnExpire: true,
+    maxKeys: 1000
 });
 
 // Rate Limiting
@@ -94,15 +81,15 @@ const authLimiter = rateLimit({
 app.use('/api/', limiter);
 app.use('/api/auth/', authLimiter);
 
-// MongoDB Connection with optimized settings
+// MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/usermanagement', {
-    maxPoolSize: 20, // Increased pool size for better concurrency
-    minPoolSize: 5, // Maintain minimum connections
-    maxIdleTimeMS: 30000, // Close connections after 30s of inactivity
+    maxPoolSize: 20,
+    minPoolSize: 5,
+    maxIdleTimeMS: 30000,
     serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
-    retryWrites: true, // Enable retryable writes
-    retryReads: true, // Enable retryable reads
+    retryWrites: true,
+    retryReads: true,
 });
 
 // User Schema
@@ -134,64 +121,109 @@ const userSchema = new mongoose.Schema({
     toObject: { virtuals: true }
 });
 
-// Optimized indexes for better query performance
-// Note: email and phone already have unique indexes from schema definition
-userSchema.index({ createdAt: -1 }); // For sorting by creation date (most recent first)
-userSchema.index({ verified: 1, createdAt: -1 }); // Compound index for verified users with date sorting
-// Note: email + verified compound index not needed since email is already unique
+userSchema.index({ createdAt: -1 });
+userSchema.index({ verified: 1, createdAt: -1 });
 
 const User = mongoose.model('User', userSchema);
 
-// Nodemailer Configuration
-const transporter = nodemailer.createTransport({
-    host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-    // port: Number(process.env.EMAIL_PORT) || 587,
-    port: 587,
-    secure: false, // true for 465, false for 587
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-    },
-    connectionTimeout: 10000,
-    greetingTimeout: 5000,
-    socketTimeout: 10000,
-    pool: true,
-    maxConnections: 3,
-    maxMessages: 50,
-    requireTLS: true, // Force TLS
-    tls: {
-        rejectUnauthorized: false,
-    },
-});
+// Email Service Configuration
+// Using Resend API (works reliably on Render)
+const sendOTPEmail = async (email: string, otp: string): Promise<void> => {
+    const apiKey = process.env.RESEND_API_KEY;
+
+    // Development mode - just log OTP
+    if (!apiKey || process.env.NODE_ENV === 'development') {
+        console.log(`📧 [DEV MODE] OTP for ${email}: ${otp}`);
+        console.log(`⚠️  Set RESEND_API_KEY env variable for production`);
+        return;
+    }
+
+    try {
+        const response = await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                from: process.env.EMAIL_FROM || 'onboarding@resend.dev',
+                to: email,
+                subject: 'Your OTP for Verification',
+                html: `
+                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                        <h2 style="color: #333;">Verification Code</h2>
+                        <p>Your OTP verification code is:</p>
+                        <div style="background: #f4f4f4; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
+                            <h1 style="color: #2563eb; margin: 0; font-size: 32px; letter-spacing: 5px;">${otp}</h1>
+                        </div>
+                        <p style="color: #666;">This code will expire in 10 minutes.</p>
+                        <p style="color: #999; font-size: 12px; margin-top: 30px;">If you didn't request this code, please ignore this email.</p>
+                    </div>
+                `,
+            }),
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(`Resend API error: ${response.status} - ${JSON.stringify(errorData)}`);
+        }
+
+        const data = await response.json();
+        console.log('✅ Email sent successfully:', data.id);
+    } catch (error: any) {
+        console.error('❌ Email sending failed:', error.message);
+        throw new Error(`Failed to send email: ${error.message}`);
+    }
+};
+
+// Alternative: SendGrid Implementation (uncomment if you prefer SendGrid)
+/*
+const sendOTPEmailSendGrid = async (email: string, otp: string): Promise<void> => {
+    const apiKey = process.env.SENDGRID_API_KEY;
+    
+    if (!apiKey) {
+        console.log(`📧 [DEV MODE] OTP for ${email}: ${otp}`);
+        return;
+    }
+
+    try {
+        const response = await fetch('https://api.sendgrid.com/v3/mail/send', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                personalizations: [{
+                    to: [{ email }],
+                    subject: 'Your OTP for Verification',
+                }],
+                from: {
+                    email: process.env.EMAIL_FROM || 'noreply@yourdomain.com',
+                    name: 'User Management'
+                },
+                content: [{
+                    type: 'text/html',
+                    value: `<p>Your OTP is: <strong>${otp}</strong></p><p>Valid for 10 minutes.</p>`
+                }]
+            }),
+        });
+
+        if (!response.ok) {
+            throw new Error(`SendGrid API error: ${response.status}`);
+        }
+
+        console.log('✅ Email sent via SendGrid');
+    } catch (error: any) {
+        console.error('❌ Email sending failed:', error.message);
+        throw new Error(`Failed to send email: ${error.message}`);
+    }
+};
+*/
 
 // Utility Functions
 const generateOTP = (): string => {
     return crypto.randomInt(100000, 999999).toString();
-};
-
-const sendOTPEmail = async (email: string, otp: string): Promise<void> => {
-    try {
-        // Verify transporter configuration first
-        await transporter.verify();
-
-        const mailOptions = {
-            from: process.env.EMAIL_FROM || 'noreply@usermgmt.com',
-            to: email,
-            subject: 'Your OTP for Verification',
-            html: `<p>Your OTP is: <strong>${otp}</strong></p><p>Valid for 10 minutes.</p>`
-        };
-
-        const info = await transporter.sendMail(mailOptions);
-        console.log('Email sent successfully:', info.messageId);
-    } catch (error: any) {
-        console.error('Email sending failed:', {
-            error: error.message,
-            code: error.code,
-            command: error.command,
-            response: error.response
-        });
-        throw new Error(`Failed to send email: ${error.message}`);
-    }
 };
 
 // Validation Middleware
@@ -214,7 +246,7 @@ const asyncHandler = (fn: Function) => (req: Request, res: Response, next: NextF
 
 // Routes
 
-// Health check with database status
+// Health check
 app.get('/api/health', async (req, res) => {
     try {
         const dbStatus = mongoose.connection.readyState;
@@ -227,6 +259,10 @@ app.get('/api/health', async (req, res) => {
             database: {
                 status: dbStates[dbStatus],
                 connected: dbStatus === 1
+            },
+            email: {
+                service: process.env.RESEND_API_KEY ? 'Resend' : 'Development (Console)',
+                configured: !!process.env.RESEND_API_KEY
             },
             cache: {
                 keys: cache.keys().length,
@@ -265,6 +301,13 @@ app.post('/api/auth/generate-otp', validateOTP.slice(0, 1), asyncHandler(async (
 
     try {
         await sendOTPEmail(email, otp);
+
+        res.json({
+            success: true,
+            message: 'OTP sent to email',
+            ...(process.env.NODE_ENV === 'development' && { otp }), // Show OTP only in dev
+            expiresIn: '10 minutes'
+        });
     } catch (error: any) {
         console.error('Email send error:', error);
         return res.status(500).json({
@@ -273,13 +316,6 @@ app.post('/api/auth/generate-otp', validateOTP.slice(0, 1), asyncHandler(async (
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
-
-    res.json({
-        success: true,
-        message: 'OTP generated',
-        otp, // For demo purposes only - remove in production
-        expiresIn: '10 minutes'
-    });
 }));
 
 // Verify OTP
@@ -309,7 +345,7 @@ app.post('/api/auth/verify-otp', validateOTP, asyncHandler(async (req: Request, 
     user.otpExpiry = undefined;
     await user.save();
 
-    // Clear all user list cache entries
+    // Clear cache
     const keys = cache.keys();
     keys.forEach(key => {
         if (key.startsWith('users_list_')) {
@@ -329,10 +365,10 @@ app.post('/api/users', validateUser, asyncHandler(async (req: Request, res: Resp
 
     const { name, email, phone, addr } = req.body;
 
-    // Optimized query using indexes
     const existingUser = await User.findOne({
         $or: [{ email }, { phone }]
     }).lean();
+
     if (existingUser) {
         return res.status(409).json({
             success: false,
@@ -354,29 +390,29 @@ app.post('/api/users', validateUser, asyncHandler(async (req: Request, res: Resp
 
     try {
         await sendOTPEmail(email, otp);
+
+        // Clear cache
+        const keys = cache.keys();
+        keys.forEach(key => {
+            if (key.startsWith('users_list_')) {
+                cache.del(key);
+            }
+        });
+
+        res.status(201).json({
+            success: true,
+            data: user,
+            ...(process.env.NODE_ENV === 'development' && { otp }), // Show OTP only in dev
+            message: 'User created. OTP sent to email.'
+        });
     } catch (error: any) {
         console.error('Email send error:', error);
         return res.status(500).json({
             success: false,
-            message: 'User created but failed to send OTP email. Please try generating OTP again.',
+            message: 'User created but failed to send OTP email. Please generate OTP again.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
-
-    // Clear all user list cache entries
-    const keys = cache.keys();
-    keys.forEach(key => {
-        if (key.startsWith('users_list_')) {
-            cache.del(key);
-        }
-    });
-
-    res.status(201).json({
-        success: true,
-        data: user,
-        otp, // For demo purposes only
-        message: 'User created. OTP sent to email.'
-    });
 }));
 
 // Get All Users
@@ -392,7 +428,6 @@ app.get('/api/users', asyncHandler(async (req: Request, res: Response) => {
         return res.json(cached);
     }
 
-    // Optimized query with projection to reduce data transfer
     const [users, total] = await Promise.all([
         User.find({}, {
             name: 1,
@@ -465,13 +500,11 @@ app.put('/api/users/:id', validateUser, asyncHandler(async (req: Request, res: R
         return res.status(400).json({ success: false, message: 'Invalid user ID' });
     }
 
-    // Check if user exists first
     const existingUser = await User.findById(id as string);
     if (!existingUser) {
         return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    // Check for duplicates (excluding current user) - optimized query
     const duplicate = await User.findOne({
         $or: [{ email }, { phone }],
         _id: { $ne: id }
@@ -494,10 +527,8 @@ app.put('/api/users/:id', validateUser, asyncHandler(async (req: Request, res: R
         return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    // Clear relevant cache entries
-    cache.del('users_list');
+    // Clear cache
     cache.del(`user_${id}`);
-    // Clear all user list cache entries
     const keys = cache.keys();
     keys.forEach(key => {
         if (key.startsWith('users_list_')) {
@@ -516,7 +547,6 @@ app.delete('/api/users/:id', asyncHandler(async (req: Request, res: Response) =>
         return res.status(400).json({ success: false, message: 'Invalid user ID' });
     }
 
-    // Check if user exists first
     const existingUser = await User.findById(id as string);
     if (!existingUser) {
         return res.status(404).json({ success: false, message: 'User not found' });
@@ -528,10 +558,8 @@ app.delete('/api/users/:id', asyncHandler(async (req: Request, res: Response) =>
         return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    // Clear relevant cache entries
-    cache.del('users_list');
+    // Clear cache
     cache.del(`user_${id}`);
-    // Clear all user list cache entries
     const keys = cache.keys();
     keys.forEach(key => {
         if (key.startsWith('users_list_')) {
@@ -541,15 +569,6 @@ app.delete('/api/users/:id', asyncHandler(async (req: Request, res: Response) =>
 
     res.json({ success: true, message: 'User deleted successfully' });
 }));
-
-// Performance monitoring middleware
-app.use((req: Request, res: Response, next: NextFunction) => {
-    const start = Date.now();
-    res.on('finish', () => {
-        const duration = Date.now() - start;
-    });
-    next();
-});
 
 // Global Error Handler
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {
@@ -563,5 +582,7 @@ app.use((err: any, req: Request, res: Response, next: NextFunction) => {
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📧 Email service: ${process.env.RESEND_API_KEY ? 'Resend (Production)' : 'Console (Development)'}`);
+    console.log(`🗄️  Database: ${process.env.MONGODB_URI ? 'MongoDB Atlas' : 'Local MongoDB'}`);
 });
