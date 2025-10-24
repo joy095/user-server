@@ -175,8 +175,9 @@ const User = mongoose.model('User', userSchema);
 // Nodemailer Configuration
 const transporter = nodemailer.createTransport({
     host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-    port: Number(process.env.EMAIL_PORT) || 465,
-    secure: true, // true for port 465
+    // port: Number(process.env.EMAIL_PORT) || 587,
+    port: 587,
+    secure: false, // true for 465, false for 587
     auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS,
@@ -187,6 +188,7 @@ const transporter = nodemailer.createTransport({
     pool: true,
     maxConnections: 3,
     maxMessages: 50,
+    requireTLS: true, // Force TLS
     tls: {
         rejectUnauthorized: false,
     },
