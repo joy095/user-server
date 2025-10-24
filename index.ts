@@ -126,7 +126,7 @@ const User = mongoose.model('User', userSchema);
 
 // Nodemailer Configuration
 const transporter = nodemailer.createTransport({
-    host: process.env.EMAIL_HOST || 'smtp.ethereal.email',
+    host: process.env.EMAIL_HOST || 'smtp.gmail.com',
     port: Number(process.env.EMAIL_PORT) || 587,
     secure: true, // Use false for port 587, true for port 465
     auth: {
